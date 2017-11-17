@@ -1,6 +1,6 @@
 # libmigrate
 
-To compile the static library alone into the lib/ directory, you can simply run:
+To compile the static library alone into the *lib/* directory, you can simply run:
 
 ```
 make

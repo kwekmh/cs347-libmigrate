@@ -31,4 +31,4 @@ create_dirs:
 .PHONY: clean
 
 clean:
-	rm -rf $(BINDIR)/* $(OBJS) $(TESTS)
+	rm -rf $(LIBDIR)/* $(OBJS) $(TESTS)
