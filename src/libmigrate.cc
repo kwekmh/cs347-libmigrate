@@ -52,7 +52,6 @@ void CreateAndSendSockets(MigrationClientStructure *client_struct, int count) {
 
 void InitMigrationClient(MigrationClientStructure *client_struct) {
   int sock;
-  socklen_t addrlen;
   struct sockaddr_un addr;
 
   if ((sock = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
@@ -61,9 +60,8 @@ void InitMigrationClient(MigrationClientStructure *client_struct) {
 
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, MIGRATION_CLIENT_SOCKET_PATH, strlen(MIGRATION_CLIENT_SOCKET_PATH) + 1);
-  addrlen = strlen(addr.sun_path) + sizeof(addr.sun_family);
 
-  if (connect(sock, (struct sockaddr *) &addr, addrlen) < 0) {
+  if (connect(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
     std::cout << addr.sun_path << std::endl;
     perror("InitMigrationClient() connect");
   }
