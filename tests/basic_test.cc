@@ -31,6 +31,8 @@ int main() {
 
   MigrationClientStructure *client_struct = RegisterAndInitMigrationService(sock, 12345);
   CreateAndSendSockets(client_struct, 5);
+  char *state = "tt123";
+  SendApplicationState(client_struct, 15000, 2, state, 5);
 
   int client_sock;
 

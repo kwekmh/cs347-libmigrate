@@ -25,6 +25,7 @@ typedef struct MigrationClientStructure {
 
 MigrationClientStructure * RegisterAndInitMigrationService(int sock, int port);
 void CreateAndSendSockets(MigrationClientStructure *client_struct, int count);
+void SendApplicationState(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, char *state, size_t size);
 void InitMigrationClient(MigrationClientStructure *client_struct);
 void * HandleMigrationClientService(void *data);
 bool SendSocketMessage(int sock, int fd);

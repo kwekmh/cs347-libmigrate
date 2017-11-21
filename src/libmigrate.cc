@@ -35,6 +35,7 @@ void CreateAndSendSockets(MigrationClientStructure *client_struct, int count) {
     std::cout << "Waiting" << std::endl;
     pthread_cond_wait(&client_struct->ready_cond, &client_struct->mutex);
   }
+  pthread_mutex_unlock(&client_struct->mutex);
   std::cout << "Ready!" << std::endl;
   int i;
 
@@ -48,6 +49,31 @@ void CreateAndSendSockets(MigrationClientStructure *client_struct, int count) {
   }
 
   SendSocketMessages(client_struct->sock, fds, count);
+}
+
+void SendApplicationState(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, char *state, size_t size) {
+  std::cout << "SendApplicationState()" << std::endl;
+  pthread_mutex_lock(&client_struct->mutex);
+  while (!client_struct->ready) {
+    pthread_cond_wait(&client_struct->ready_cond, &client_struct->mutex);
+  }
+  pthread_mutex_unlock(&client_struct->mutex);
+  std::cout << "Ready to send application state" << std::endl;
+  unsigned int i;
+
+  std::stringstream msgstream;
+
+  msgstream << "STATE " << service_identifier << " " << client_identifier << " ";
+
+  for (i = 0; i < size; i++) {
+    msgstream << state[i];
+  }
+
+  std::string msg = msgstream.str();
+
+  if (send(client_struct->sock, msg.c_str(), msg.length(), 0) < 0) {
+    perror("SendApplicationState() send");
+  }
 }
 
 void InitMigrationClient(MigrationClientStructure *client_struct) {
