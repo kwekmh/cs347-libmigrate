@@ -8,6 +8,8 @@
 #include <pthread.h>
 #include <iostream>
 #include <sstream>
+#include <thread>
+#include <chrono>
 
 #include "libmigrate.h"
 
@@ -51,6 +53,33 @@ void CreateAndSendSockets(MigrationClientStructure *client_struct, int count) {
   SendSocketMessages(client_struct->sock, fds, count);
 }
 
+void RegisterService(MigrationClientStructure* client_struct, int service_identifier) {
+  std::cout << "RegisterService()" << std::endl;
+  pthread_mutex_lock(&client_struct->mutex);
+  while (!client_struct->ready) {
+    pthread_cond_wait(&client_struct->ready_cond, &client_struct->mutex);
+  }
+  pthread_mutex_unlock(&client_struct->mutex);
+  std::cout << "Ready to register service" << std::endl;
+
+  std::stringstream msgstream;
+
+  msgstream << "REG " << service_identifier;
+
+  std::string msg = msgstream.str();
+
+  msgstream.str("");
+  msgstream.clear();
+
+  msgstream << msg.length() << " " << msg;
+
+  msg = msgstream.str();
+
+  if (send(client_struct->sock, msg.c_str(), msg.length(), 0) < 0) {
+    perror("RegisterService() send");
+  }
+}
+
 void SendApplicationState(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, char *state, size_t size) {
   std::cout << "SendApplicationState()" << std::endl;
   pthread_mutex_lock(&client_struct->mutex);
@@ -70,6 +99,13 @@ void SendApplicationState(MigrationClientStructure *client_struct, int service_i
   }
 
   std::string msg = msgstream.str();
+
+  msgstream.str("");
+  msgstream.clear();
+
+  msgstream << msg.length() << " " << msg;
+
+  msg = msgstream.str();
 
   if (send(client_struct->sock, msg.c_str(), msg.length(), 0) < 0) {
     perror("SendApplicationState() send");
@@ -139,12 +175,13 @@ void * HandleMigrationClientService(void *data) {
 }
 
 bool SendSocketMessage(int sock, int fd) {
-  if (send(sock, "SOCKETS 1", 9, 0) < 0) {
+  if (send(sock, "9 SOCKETS 1", 11, 0) < 0) {
     perror("SendSocketMessage() send");
     return false;
   } else {
     int fds[1];
     fds[0] = fd;
+    std::this_thread::sleep_for(std::chrono::seconds(2));
     return SendSocketMessageDescriptors(sock, fds, 1);
   }
 }
@@ -158,10 +195,18 @@ bool SendSocketMessages(int sock, int *fds, int fd_count) {
 
   std::string socket_msg = socket_msg_ss.str();
 
+  socket_msg_ss.str("");
+  socket_msg_ss.clear();
+
+  socket_msg_ss << socket_msg.length() << " " << socket_msg;
+
+  socket_msg = socket_msg_ss.str();
+
   if (send(sock, socket_msg.c_str(), socket_msg.length(), 0) < 0) {
     perror("SendSocketMessages() send");
     return false;
   } else {
+    std::this_thread::sleep_for(std::chrono::seconds(2));
     return SendSocketMessageDescriptors(sock, fds, fd_count);
   }
 }

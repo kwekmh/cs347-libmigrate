@@ -5,6 +5,8 @@
 #include <netinet/in.h>
 #include <cstring>
 #include <cstdlib>
+#include <thread>
+#include <chrono>
 
 #include "libmigrate.h"
 
@@ -31,8 +33,12 @@ int main() {
 
   MigrationClientStructure *client_struct = RegisterAndInitMigrationService(sock, 12345);
   CreateAndSendSockets(client_struct, 5);
-  char *state = "tt123";
-  SendApplicationState(client_struct, 15000, 2, state, 5);
+  char *state = "AAAAABBBBB";
+  RegisterService(client_struct, 10000);
+  //std::this_thread::sleep_for(std::chrono::seconds(2));
+  RegisterService(client_struct, 11000);
+  //std::this_thread::sleep_for(std::chrono::seconds(2))
+  SendApplicationState(client_struct, 12000, 58, state, 10);
 
   int client_sock;
 
