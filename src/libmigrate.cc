@@ -30,7 +30,7 @@ MigrationClientStructure * RegisterAndInitMigrationService(int sock, int port) {
   return client_struct;
 }
 
-void CreateAndSendSockets(MigrationClientStructure *client_struct, int count) {
+int * CreateAndSendSockets(MigrationClientStructure *client_struct, int count) {
   std::cout << "CreateAndSendSockets()" << std::endl;
   pthread_mutex_lock(&client_struct->mutex);
   while (!client_struct->ready) {
@@ -51,6 +51,7 @@ void CreateAndSendSockets(MigrationClientStructure *client_struct, int count) {
   }
 
   SendSocketMessages(client_struct->sock, fds, count);
+  return fds;
 }
 
 void RegisterService(MigrationClientStructure* client_struct, int service_identifier) {
@@ -161,13 +162,66 @@ void * HandleMigrationClientService(void *data) {
     }
     buf[in_bytes] = '\0';
     std::cout << "LOCALMSG: " << buf << std::endl;
-    if (strncmp(buf, "NEW", in_bytes) == 0) {
-      int *fds_to_send = client_struct->context->fds;
-      int i;
-      for (i = 0; i < client_struct->context->fd_count; i++) {
-        int fd = *(fds_to_send + i);
-        if (!SendSocketMessage(sock, fd)) {
-          std::cout << "Failed to send descriptor " << fd << std::endl;
+    int i = 0;
+    while (i < in_bytes) {
+      std::stringstream msg_size_stream;
+
+      for (; i < in_bytes; i++) {
+        if (buf[i] != ' ') {
+          msg_size_stream << buf[i];
+        } else {
+          break;
+        }
+      }
+
+      int msg_size = std::stoi(msg_size_stream.str());
+      if (strncmp(buf + i, "NEW", 3) == 0) {
+        i += 4;
+        int *fds_to_send = client_struct->context->fds;
+        for (int i = 0; i < client_struct->context->fd_count; i++) {
+          int fd = *(fds_to_send + i);
+          if (!SendSocketMessage(sock, fd)) {
+            std::cout << "Failed to send descriptor " << fd << std::endl;
+          }
+        }
+      } else if (strncmp(buf + i, "REQ", 3) == 0) {
+        std::stringstream service_identifier_ss;
+        std::stringstream count_ss;
+
+        int max_bytes = i + msg_size;
+
+        for (i += 4; i < max_bytes; i++) {
+          if (buf[i] != ' ') {
+            service_identifier_ss << buf[i];
+          } else {
+            break;
+          }
+        }
+
+        for (; i < max_bytes; i++) {
+          if (buf[i] != ' ') {
+            count_ss << buf[i];
+          } else {
+            break;
+          }
+        }
+
+        int service_identifier = std::stoi(service_identifier_ss.str());
+        int count = std::stoi(count_ss.str());
+
+        int *fds = CreateAndSendSockets(client_struct, count);
+
+        auto clients_it = client_struct->context->services.find(service_identifier);
+        std::unordered_map<int, char *> *clients;
+        if (clients_it == client_struct->context->services.end()) {
+          clients = new std::unordered_map<int, char *>();
+          client_struct->context->services[service_identifier] = clients;
+        } else {
+          clients = clients_it->second;
+        }
+
+        for (int i = 0; i < count; i++) {
+          (*clients)[fds[i]] = NULL;
         }
       }
     }

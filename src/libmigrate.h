@@ -2,10 +2,12 @@
 #define MIGRATELIB_MIGRATELIB_H_
 
 #include <pthread.h>
+#include <unordered_map>
 
 typedef struct Context {
   int *fds;
   int fd_count;
+  std::unordered_map<int, std::unordered_map<int, char *> *> services;
 } Context;
 
 typedef struct MigrationClientStructure {
@@ -24,7 +26,7 @@ typedef struct MigrationClientStructure {
 #define MIGRATION_CLIENT_SOCKET_PATH STR_VALUE(/var/migrated/local-socket)
 
 MigrationClientStructure * RegisterAndInitMigrationService(int sock, int port);
-void CreateAndSendSockets(MigrationClientStructure *client_struct, int count);
+int * CreateAndSendSockets(MigrationClientStructure *client_struct, int count);
 void RegisterService(MigrationClientStructure *client_struct, int service_identifier);
 void SendApplicationState(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, char *state, size_t size);
 void InitMigrationClient(MigrationClientStructure *client_struct);
