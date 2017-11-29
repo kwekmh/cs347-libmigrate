@@ -5,7 +5,10 @@
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -18,6 +21,9 @@ MigrationClientStructure * RegisterAndInitMigrationService(int sock, int port) {
   Context *context = new Context;
   MigrationClientStructure *client_struct = new MigrationClientStructure;
 
+  pthread_mutex_init(&client_struct->mutex, NULL);
+  pthread_cond_init(&client_struct->ready_cond, NULL);
+
   client_struct->fd = sock;
   client_struct->port = port;
   client_struct->ready = false;
@@ -25,6 +31,7 @@ MigrationClientStructure * RegisterAndInitMigrationService(int sock, int port) {
   client_struct->context = context;
 
   InitMigrationClient(client_struct);
+  RegisterService(client_struct, port);
   std::cout << "Init Migration Service Done" << std::endl;
 
   return client_struct;
@@ -81,7 +88,30 @@ void RegisterService(MigrationClientStructure* client_struct, int service_identi
   }
 }
 
-void SendApplicationState(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, char *state, size_t size) {
+void RegisterClient(MigrationClientStructure *client_struct, int service_identifier, int client_identifier) {
+  pthread_mutex_lock(&client_struct->mutex);
+  while (!client_struct->ready) {
+    pthread_cond_wait(&client_struct->ready_cond, &client_struct->mutex);
+  }
+  pthread_mutex_unlock(&client_struct->mutex);
+  std::stringstream msgstream;
+
+  msgstream << "CLIENT " << service_identifier << " " << client_identifier;
+
+  std::string msg = msgstream.str();
+
+  msgstream.str("");
+  msgstream.clear();
+
+  msgstream << msg.length() << " " << msg;
+  msg = msgstream.str();
+
+  if (send(client_struct->sock, msg.c_str(), msg.length(), 0) < 0) {
+    perror("RegisterClient() send");
+  }
+}
+
+void SendApplicationState(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, const char *state, size_t size) {
   std::cout << "SendApplicationState()" << std::endl;
   pthread_mutex_lock(&client_struct->mutex);
   while (!client_struct->ready) {
@@ -113,6 +143,30 @@ void SendApplicationState(MigrationClientStructure *client_struct, int service_i
   }
 }
 
+void SendApplicationStateWithTcp(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, int sock, const char *app_data, size_t app_data_size) {
+  struct sockaddr_in addr;
+
+  socklen_t addrlen;
+
+  char ip_addr[INET_ADDRSTRLEN];
+
+  getpeername(sock, (struct sockaddr *) &addr, &addrlen);
+
+  int port = ntohs(addr.sin_port);
+
+  inet_ntop(AF_INET, &(addr.sin_addr), ip_addr, INET_ADDRSTRLEN);
+
+  char *tcp_data;
+  int tcp_data_len;
+
+  int send_seq = GetSequenceNumber(sock, TCP_SEND_QUEUE);
+  int recv_seq = GetSequenceNumber(sock, TCP_RECV_QUEUE);
+
+  BuildTcpData(&tcp_data, &tcp_data_len, std::string(ip_addr), port, send_seq, recv_seq, app_data, app_data_size);
+
+  SendApplicationState(client_struct, service_identifier, client_identifier, tcp_data, tcp_data_len);
+}
+
 void InitMigrationClient(MigrationClientStructure *client_struct) {
   int sock;
   struct sockaddr_un addr;
@@ -136,8 +190,27 @@ void InitMigrationClient(MigrationClientStructure *client_struct) {
   pthread_create(&client_service_pthread, NULL, HandleMigrationClientService, (void *) client_struct);
 }
 
+void BuildTcpData(char **data_ptr, int *len, std::string ip_str, int remote_port, unsigned int send_seq, unsigned int recv_seq, const char *app_data, int app_data_len) {
+  std::stringstream ss;
+
+  ss << ip_str << " " << remote_port << " " << send_seq << " " << recv_seq << " " << std::string(app_data, app_data_len);
+
+  std::string data = ss.str();
+
+  const char *data_buf = data.c_str();
+
+  *data_ptr = new char[data.length()];
+
+  for (int i = 0; i < data.length(); i++) {
+    (*data_ptr)[i] = data_buf[i];
+  }
+
+  *len = data.length();
+}
+
 void * HandleMigrationClientService(void *data) {
   MigrationClientStructure *client_struct = (MigrationClientStructure *) data;
+  Context *context = client_struct->context;
   pthread_mutex_lock(&client_struct->mutex);
 
   int sock = client_struct->sock;
@@ -153,29 +226,32 @@ void * HandleMigrationClientService(void *data) {
   pthread_mutex_unlock(&client_struct->mutex);
 
   while (1) {
-    in_bytes = recv(sock, &buf, MSG_BUFFER_SIZE - 1, 0);
+    in_bytes = recv(sock, &buf, MSG_BUFFER_SIZE, 0);
     if (in_bytes < 0) {
       perror("HandleMigrationClientService() recv");
       pthread_exit(NULL);
     } else if (in_bytes == 0) {
       pthread_exit(NULL);
     }
-    buf[in_bytes] = '\0';
-    std::cout << "LOCALMSG: " << buf << std::endl;
+    std::cout << "LOCALMSG: " << std::string(buf, in_bytes) << std::endl;
     int i = 0;
     while (i < in_bytes) {
-      std::stringstream msg_size_stream;
+      std::stringstream msg_size_ss;
 
       for (; i < in_bytes; i++) {
         if (buf[i] != ' ') {
-          msg_size_stream << buf[i];
+          msg_size_ss << buf[i];
         } else {
           break;
         }
       }
 
-      int msg_size = std::stoi(msg_size_stream.str());
-      if (strncmp(buf + i, "NEW", 3) == 0) {
+      i++;
+
+      std::string msg_size_str = msg_size_ss.str();
+
+      int msg_size = std::stoi(msg_size_ss.str());
+      if (msg_size > 3 && strncmp(buf + i, "NEW", 3) == 0) {
         i += 4;
         int *fds_to_send = client_struct->context->fds;
         for (int i = 0; i < client_struct->context->fd_count; i++) {
@@ -184,7 +260,7 @@ void * HandleMigrationClientService(void *data) {
             std::cout << "Failed to send descriptor " << fd << std::endl;
           }
         }
-      } else if (strncmp(buf + i, "REQ", 3) == 0) {
+      } else if (msg_size > 3 && strncmp(buf + i, "REQ", 3) == 0) {
         std::stringstream service_identifier_ss;
         std::stringstream count_ss;
 
@@ -197,6 +273,8 @@ void * HandleMigrationClientService(void *data) {
             break;
           }
         }
+
+        i++;
 
         for (; i < max_bytes; i++) {
           if (buf[i] != ' ') {
@@ -212,9 +290,9 @@ void * HandleMigrationClientService(void *data) {
         int *fds = CreateAndSendSockets(client_struct, count);
 
         auto clients_it = client_struct->context->services.find(service_identifier);
-        std::unordered_map<int, char *> *clients;
+        std::unordered_map<int, ClientData *> *clients;
         if (clients_it == client_struct->context->services.end()) {
-          clients = new std::unordered_map<int, char *>();
+          clients = new std::unordered_map<int, ClientData *>();
           client_struct->context->services[service_identifier] = clients;
         } else {
           clients = clients_it->second;
@@ -222,6 +300,148 @@ void * HandleMigrationClientService(void *data) {
 
         for (int i = 0; i < count; i++) {
           (*clients)[fds[i]] = NULL;
+        }
+      } else if (msg_size > 3 && strncmp(buf + i, "MAP", 3) == 0) {
+        std::stringstream service_ident_ss;
+        std::stringstream client_ident_ss;
+        std::stringstream fd_ss;
+
+        int max_bytes = i + msg_size;
+
+        for (i += 4; i < max_bytes; i++) {
+          if (buf[i] != ' ') {
+            service_ident_ss << buf[i];
+          } else {
+            break;
+          }
+        }
+
+        i++;
+
+        for (; i < max_bytes; i++) {
+          if (buf[i] != ' ') {
+            client_ident_ss << buf[i];
+          } else {
+            break;
+          }
+        }
+
+        i++;
+
+        for (; i < max_bytes; i++) {
+          if (buf[i] != ' ') {
+            fd_ss << buf[i];
+          } else {
+            break;
+          }
+        }
+
+        int service_identifier = std::stoi(service_ident_ss.str());
+        int client_identifier = std::stoi(client_ident_ss.str());
+        int fd = std::stoi(fd_ss.str());
+
+        auto it = context->services.find(service_identifier);
+
+        std::unordered_map<int, ClientData *> *clients;
+
+        if (it != context->services.end()) {
+          clients = it->second;
+        } else {
+          clients = new std::unordered_map<int, ClientData *>();
+          context->services[service_identifier] = clients;
+        }
+
+        ClientData *client_data;
+
+        auto clients_it = clients->find(client_identifier);
+        if (clients_it != clients->end()) {
+          client_data = clients_it->second;
+        } else {
+          client_data = new ClientData(client_identifier);
+          (*clients)[client_identifier] = client_data;
+        }
+
+        client_data->SetDescriptor(fd);
+      } else if (msg_size > 5 && strncmp(buf + i, "STATE", 5) == 0) {
+        std::stringstream service_ident_ss;
+        std::stringstream client_ident_ss;
+        std::stringstream state_ss;
+
+        int max_bytes = i + msg_size;
+
+        for (i += 6; i < max_bytes; i++) {
+          if (buf[i] != ' ') {
+            service_ident_ss << buf[i];
+          } else {
+            break;
+          }
+        }
+
+        i++;
+
+        for (; i < max_bytes; i++) {
+          if (buf[i] != ' ') {
+            client_ident_ss << buf[i];
+          } else {
+            break;
+          }
+        }
+
+        i++;
+
+        for (; i < max_bytes; i++) {
+          state_ss << buf[i];
+        }
+
+        std::string service_ident_str = service_ident_ss.str();
+        std::string client_ident_str = client_ident_ss.str();
+
+        int service_identifier = std::stoi(service_ident_ss.str());
+        int client_identifier = std::stoi(client_ident_ss.str());
+
+        std::string state_str = state_ss.str();
+
+        std::istringstream is_state(state_str);
+        std::string ip_str;
+        std::string port_str;
+        std::string tcp_send_seq_str;
+        std::string tcp_recv_seq_str;
+        std::string app_info_length_str;
+        if (std::getline(is_state, ip_str, ' ') && std::getline(is_state, port_str, ' ') && std::getline(is_state, tcp_send_seq_str, ' ') && std::getline(is_state, tcp_recv_seq_str, ' ') && std::getline(is_state, app_info_length_str)) {
+          int remote_port = std::stoi(port_str);
+
+          auto services_it = context->services.find(service_identifier);
+
+          std::unordered_map<int, ClientData *> *clients;
+
+          if (services_it != context->services.end()) {
+            clients = services_it->second;
+          } else {
+            clients = new std::unordered_map<int, ClientData *>();
+            context->services[service_identifier] = clients;
+          }
+
+          ClientData *client;
+
+          auto clients_it = clients->find(client_identifier);
+
+          if (clients_it != clients->end()) {
+            client = clients_it->second;
+          } else {
+            client = new ClientData(client_identifier);
+          }
+
+          const char *state_data_buf = state_str.c_str();
+
+          char *state_data = new char[state_str.length()];
+
+          for (int i = 0; i < state_str.length(); i++) {
+            state_data[i] = state_data_buf[i];
+          }
+
+          client->SetRemotePort(remote_port);
+          client->SetState(state_data);
+          client->SetStateSize(state_str.length());
         }
       }
     }
@@ -260,7 +480,7 @@ bool SendSocketMessages(int sock, int *fds, int fd_count) {
     perror("SendSocketMessages() send");
     return false;
   } else {
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::this_thread::sleep_for(std::chrono::seconds(5));
     return SendSocketMessageDescriptors(sock, fds, fd_count);
   }
 }
@@ -349,4 +569,23 @@ bool SendSocketMessageDescriptors(int sock, int *fds, int fd_count) {
     std::cout << "Descriptors sent" << std::endl;
     return true;
   }
+}
+
+uint32_t GetSequenceNumber(int sock, int q_id) {
+  int aux_on = 1;
+  int aux_off = 0;
+
+  uint32_t seq_number;
+
+  socklen_t seq_number_len = sizeof(seq_number);
+
+  setsockopt(sock, SOL_TCP, TCP_REPAIR, &aux_on, sizeof(aux_on));
+
+  setsockopt(sock, SOL_TCP, TCP_REPAIR_QUEUE, &q_id, sizeof(q_id));
+
+  getsockopt(sock, SOL_TCP, TCP_QUEUE_SEQ, &seq_number, &seq_number_len);
+
+  setsockopt(sock, SOL_TCP, TCP_REPAIR, &aux_off, sizeof(aux_off));
+
+  return seq_number;
 }
