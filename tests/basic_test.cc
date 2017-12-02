@@ -57,6 +57,8 @@ int main() {
   int in_bytes;
   char buf[256];
 
+  DumpSocketInfo(client_sock);
+
   while (1) {
     in_bytes = recv(client_sock, buf, 255, 0);
     if (in_bytes < 0) {

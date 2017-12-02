@@ -15,6 +15,7 @@
 #include <chrono>
 
 #include "libmigrate.h"
+#include "tcp_socket_options.h"
 
 MigrationClientStructure * RegisterAndInitMigrationService(int sock, int port) {
   std::cout << "Init Migration Service" << std::endl;
@@ -55,6 +56,7 @@ int * CreateAndSendSockets(MigrationClientStructure *client_struct, int count) {
   for (i = 0; i < count; i++) {
     sock = socket(AF_INET, SOCK_STREAM, 0);
     fds[i] = sock;
+    std::cout << "Created socket " << sock << std::endl;
   }
 
   SendSocketMessages(client_struct->sock, fds, count);
@@ -146,7 +148,7 @@ void SendApplicationState(MigrationClientStructure *client_struct, int service_i
 void SendApplicationStateWithTcp(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, int sock, const char *app_data, size_t app_data_size) {
   struct sockaddr_in addr;
 
-  socklen_t addrlen;
+  socklen_t addrlen = sizeof(addr);
 
   char ip_addr[INET_ADDRSTRLEN];
 
@@ -156,13 +158,17 @@ void SendApplicationStateWithTcp(MigrationClientStructure *client_struct, int se
 
   inet_ntop(AF_INET, &(addr.sin_addr), ip_addr, INET_ADDRSTRLEN);
 
+  std::cout << "IP address of peer is: " << std::string(ip_addr) << std::endl;
+
   char *tcp_data;
   int tcp_data_len;
 
   int send_seq = GetSequenceNumber(sock, TCP_SEND_QUEUE);
   int recv_seq = GetSequenceNumber(sock, TCP_RECV_QUEUE);
 
-  BuildTcpData(&tcp_data, &tcp_data_len, std::string(ip_addr), port, send_seq, recv_seq, app_data, app_data_size);
+  TcpSocketOptions opts(sock);
+
+  BuildTcpData(&tcp_data, &tcp_data_len, std::string(ip_addr), port, send_seq, recv_seq, opts.GetString(), app_data, app_data_size);
 
   SendApplicationState(client_struct, service_identifier, client_identifier, tcp_data, tcp_data_len);
 }
@@ -190,10 +196,10 @@ void InitMigrationClient(MigrationClientStructure *client_struct) {
   pthread_create(&client_service_pthread, NULL, HandleMigrationClientService, (void *) client_struct);
 }
 
-void BuildTcpData(char **data_ptr, int *len, std::string ip_str, int remote_port, unsigned int send_seq, unsigned int recv_seq, const char *app_data, int app_data_len) {
+void BuildTcpData(char **data_ptr, int *len, std::string ip_str, int remote_port, unsigned int send_seq, unsigned int recv_seq, std::string tcp_opts, const char *app_data, int app_data_len) {
   std::stringstream ss;
 
-  ss << ip_str << " " << remote_port << " " << send_seq << " " << recv_seq << " " << std::string(app_data, app_data_len);
+  ss << ip_str << " " << remote_port << " " << send_seq << " " << recv_seq << " "  << tcp_opts << " " << app_data_len << " " << std::string(app_data, app_data_len);
 
   std::string data = ss.str();
 
@@ -298,9 +304,16 @@ void * HandleMigrationClientService(void *data) {
           clients = clients_it->second;
         }
 
+        // HARDCODED TEST
+        ClientData *client_data = new ClientData(0);
+        client_data->SetDescriptor(fds[0]);
+        (*clients)[0] = client_data;
+
+        /*
         for (int i = 0; i < count; i++) {
           (*clients)[fds[i]] = NULL;
         }
+        */
       } else if (msg_size > 3 && strncmp(buf + i, "MAP", 3) == 0) {
         std::stringstream service_ident_ss;
         std::stringstream client_ident_ss;
@@ -351,6 +364,7 @@ void * HandleMigrationClientService(void *data) {
           context->services[service_identifier] = clients;
         }
 
+        /*
         ClientData *client_data;
 
         auto clients_it = clients->find(client_identifier);
@@ -362,6 +376,7 @@ void * HandleMigrationClientService(void *data) {
         }
 
         client_data->SetDescriptor(fd);
+        */
       } else if (msg_size > 5 && strncmp(buf + i, "STATE", 5) == 0) {
         std::stringstream service_ident_ss;
         std::stringstream client_ident_ss;
@@ -399,6 +414,8 @@ void * HandleMigrationClientService(void *data) {
         int service_identifier = std::stoi(service_ident_ss.str());
         int client_identifier = std::stoi(client_ident_ss.str());
 
+        std::cout << "Received state for " << service_identifier << " " << client_identifier << std::endl;
+
         std::string state_str = state_ss.str();
 
         std::istringstream is_state(state_str);
@@ -406,8 +423,12 @@ void * HandleMigrationClientService(void *data) {
         std::string port_str;
         std::string tcp_send_seq_str;
         std::string tcp_recv_seq_str;
+        std::string mss_clamp_str;
+        std::string snd_wscale_str;
+        std::string rcv_wscale_str;
+        std::string timestamp_str;
         std::string app_info_length_str;
-        if (std::getline(is_state, ip_str, ' ') && std::getline(is_state, port_str, ' ') && std::getline(is_state, tcp_send_seq_str, ' ') && std::getline(is_state, tcp_recv_seq_str, ' ') && std::getline(is_state, app_info_length_str)) {
+        if (std::getline(is_state, ip_str, ' ') && std::getline(is_state, port_str, ' ') && std::getline(is_state, tcp_send_seq_str, ' ') && std::getline(is_state, tcp_recv_seq_str, ' ') && std::getline(is_state, mss_clamp_str, ' ') && std::getline(is_state, snd_wscale_str, ' ') && std::getline(is_state, rcv_wscale_str, ' ') && std::getline(is_state, timestamp_str, ' ') && std::getline(is_state, app_info_length_str, ' ')) {
           int remote_port = std::stoi(port_str);
 
           auto services_it = context->services.find(service_identifier);
@@ -429,6 +450,7 @@ void * HandleMigrationClientService(void *data) {
             client = clients_it->second;
           } else {
             client = new ClientData(client_identifier);
+            (*clients)[client_identifier] = client;
           }
 
           const char *state_data_buf = state_str.c_str();
@@ -443,9 +465,56 @@ void * HandleMigrationClientService(void *data) {
           client->SetState(state_data);
           client->SetStateSize(state_str.length());
         }
+      } else if (msg_size > 4 && strncmp(buf + i, "DONE", 4) == 0) {
+        std::stringstream service_ident_ss;
+
+        int max_bytes = i + msg_size;
+        for (i += 5; i < max_bytes; i++) {
+          service_ident_ss << buf[i];
+        }
+
+        int service_identifier = std::stoi(service_ident_ss.str());
+        HANDLER_FUNCTION migration_handler = context->migration_handlers[service_identifier];
+
+        std::unordered_map<int, ClientData *> *clients = context->services[service_identifier];
+        for (auto it = clients->begin(); it != clients->end(); it++) {
+          std::istringstream is_state(std::string(it->second->GetState(), it->second->GetStateSize()));
+          std::string ip_str;
+          std::string port_str;
+          std::string tcp_send_seq_str;
+          std::string tcp_recv_seq_str;
+          std::string mss_clamp_str;
+          std::string snd_wscale_str;
+          std::string rcv_wscale_str;
+          std::string timestamp_str;
+          std::string app_info_length_str;
+          std::string app_data;
+          if (std::getline(is_state, ip_str, ' ') && std::getline(is_state, port_str, ' ') && std::getline(is_state, tcp_send_seq_str, ' ') && std::getline(is_state, tcp_recv_seq_str, ' ') && std::getline(is_state, mss_clamp_str, ' ') && std::getline(is_state, snd_wscale_str, ' ') && std::getline(is_state, rcv_wscale_str, ' ') && std::getline(is_state, timestamp_str, ' ') && std::getline(is_state, app_info_length_str, ' ') && std::getline(is_state, app_data)) {
+            auto ip_it = context->ip_services.find(service_identifier);
+
+            std::unordered_map<std::string, ClientData *> *ips;
+            if (ip_it != context->ip_services.end()) {
+              ips = ip_it->second;
+            } else {
+              ips = new std::unordered_map<std::string, ClientData *>();
+              context->ip_services[service_identifier] = ips;
+            }
+
+            (*ips)[ip_str] = it->second;
+
+            std::cout << "Taking over " << it->first << " " << it->second << std::endl;
+            //migration_handler(client_struct, it->second);
+          }
+        }
       }
     }
   }
+}
+
+void DumpSocketInfo(int fd) {
+  TcpSocketOptions opts(fd);
+
+  opts.Dump();
 }
 
 bool SendSocketMessage(int sock, int fd) {
@@ -588,4 +657,74 @@ uint32_t GetSequenceNumber(int sock, int q_id) {
   setsockopt(sock, SOL_TCP, TCP_REPAIR, &aux_off, sizeof(aux_off));
 
   return seq_number;
+}
+
+ClientData *GetIpClient(MigrationClientStructure *migration_client, int service_identifier, std::string ip_str) {
+  ClientData *data = NULL;
+
+  auto it = migration_client->context->ip_services.find(service_identifier);
+
+  if (it != migration_client->context->ip_services.end()) {
+    if (it->second->find(ip_str) != it->second->end()) {
+      data = (*it->second)[ip_str];
+    } else {
+      std::cout << "GetIpClient() " << ip_str << " not found!" << std::endl;
+    }
+  } else {
+    std::cout << "GetIpClient() service not found!" << std::endl;
+  }
+
+  return data;
+}
+
+std::string GetAppData(std::string data_str) {
+  std::istringstream is_state(data_str);
+  std::string ip_str;
+  std::string port_str;
+  std::string tcp_send_seq_str;
+  std::string tcp_recv_seq_str;
+  std::string mss_clamp_str;
+  std::string snd_wscale_str;
+  std::string rcv_wscale_str;
+  std::string timestamp_str;
+  std::string app_info_length_str;
+  std::string app_data;
+  if (std::getline(is_state, ip_str, ' ') && std::getline(is_state, port_str, ' ') && std::getline(is_state, tcp_send_seq_str, ' ') && std::getline(is_state, tcp_recv_seq_str, ' ') && std::getline(is_state, mss_clamp_str, ' ') && std::getline(is_state, snd_wscale_str, ' ') && std::getline(is_state, rcv_wscale_str, ' ') && std::getline(is_state, timestamp_str, ' ') && std::getline(is_state, app_info_length_str, ' ') && std::getline(is_state, app_data)) {
+    return app_data;
+  }
+
+  return std::string();
+}
+
+pthread_mutex_t * GetMutex(Context *context, int service_identifier) {
+  pthread_mutex_t *mutex_ptr;
+  pthread_mutex_lock(&context->sock_mutexes_mutex);
+  auto it = context->sock_mutexes.find(service_identifier);
+
+  if (it != context->sock_mutexes.end()) {
+    mutex_ptr = it->second;
+  } else {
+    mutex_ptr = new pthread_mutex_t;
+    pthread_mutex_init(mutex_ptr, NULL);
+    context->sock_mutexes[service_identifier] = mutex_ptr;
+  }
+  pthread_mutex_unlock(&context->sock_mutexes_mutex);
+  return mutex_ptr;
+}
+
+pthread_cond_t * GetCond(Context *context, int service_identifier) {
+  pthread_cond_t *cond_ptr;
+  pthread_mutex_lock(&context->sock_conds_mutex);
+  auto it = context->sock_conds.find(service_identifier);
+
+  if (it != context->sock_conds.end()) {
+    cond_ptr = it->second;
+  } else {
+    cond_ptr = new pthread_cond_t;
+    pthread_cond_init(cond_ptr, NULL);
+    context->sock_conds[service_identifier] = cond_ptr;
+  }
+  pthread_mutex_unlock(&context->sock_conds_mutex);
+
+  return cond_ptr;
 }
