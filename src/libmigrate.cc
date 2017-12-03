@@ -146,6 +146,7 @@ void SendApplicationState(MigrationClientStructure *client_struct, int service_i
 }
 
 void SendApplicationStateWithTcp(MigrationClientStructure *client_struct, int service_identifier, int client_identifier, int sock, const char *app_data, size_t app_data_size) {
+  // Get the remote address and port
   struct sockaddr_in addr;
 
   socklen_t addrlen = sizeof(addr);
@@ -163,11 +164,13 @@ void SendApplicationStateWithTcp(MigrationClientStructure *client_struct, int se
   char *tcp_data;
   int tcp_data_len;
 
+  // Get the TCP sequence numbers of the specified socket
   int send_seq = GetSequenceNumber(sock, TCP_SEND_QUEUE);
   int recv_seq = GetSequenceNumber(sock, TCP_RECV_QUEUE);
 
   TcpSocketOptions opts(sock);
 
+  // Build a state update message with the necessary TCP header data required for repairing a socket
   BuildTcpData(&tcp_data, &tcp_data_len, std::string(ip_addr), port, send_seq, recv_seq, opts.GetString(), app_data, app_data_size);
 
   SendApplicationState(client_struct, service_identifier, client_identifier, tcp_data, tcp_data_len);
@@ -309,11 +312,6 @@ void * HandleMigrationClientService(void *data) {
         client_data->SetDescriptor(fds[0]);
         (*clients)[0] = client_data;
 
-        /*
-        for (int i = 0; i < count; i++) {
-          (*clients)[fds[i]] = NULL;
-        }
-        */
       } else if (msg_size > 3 && strncmp(buf + i, "MAP", 3) == 0) {
         std::stringstream service_ident_ss;
         std::stringstream client_ident_ss;
@@ -364,6 +362,7 @@ void * HandleMigrationClientService(void *data) {
           context->services[service_identifier] = clients;
         }
 
+        // Original code used with TCP Repair that has since been deprecated
         /*
         ClientData *client_data;
 
@@ -593,6 +592,8 @@ bool SendSocketMessageDescriptor(int sock, int fd) {
 }
 
 bool SendSocketMessageDescriptors(int sock, int *fds, int fd_count) {
+  // A special message needs to be constructed in order for sockets to be sent
+  // Sending of sockets over processes involves SCM_RIGHTS
   int i;
   std::stringstream fd_ss;
   for (i = 0; i < fd_count; i++) {
@@ -607,7 +608,6 @@ bool SendSocketMessageDescriptors(int sock, int *fds, int fd_count) {
   struct iovec nothing_ptr;
   struct cmsghdr *cmsghdr;
 
-  //char buf[SOCKET_BUFFER_MAX_SIZE];
   struct {
     struct cmsghdr h;
     int fd[SOCKET_BUFFER_MAX_SIZE];
@@ -641,9 +641,11 @@ bool SendSocketMessageDescriptors(int sock, int *fds, int fd_count) {
 }
 
 uint32_t GetSequenceNumber(int sock, int q_id) {
+  // Set the necessary options for setsockopt
   int aux_on = 1;
   int aux_off = 0;
 
+  // Create variables to store the data from getsockopt
   uint32_t seq_number;
 
   socklen_t seq_number_len = sizeof(seq_number);
